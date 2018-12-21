@@ -478,7 +478,8 @@ KEEP_PKEY_NAMES		0
 # create table statements. If disabled (the default) primary key definition
 # will be added with an alter table statement. Enable it if you are exporting
 # to GreenPlum PostgreSQL database.
-PKEY_IN_CREATE		0
+PKEY_IN_CREATE		1
+UKEY_IN_CREATE		1
 
 # This directive allow you to add an ON UPDATE CASCADE option to a foreign
 # key when a ON DELETE CASCADE is defined or always. Oracle do not support
@@ -666,7 +667,8 @@ FILE_PER_FKEYS		0
 # corresponding configuration directive. You can use .gz xor .bz2
 # extension to enable compression. Default is to save all data in one
 # file. This is usable only during INSERT or COPY export type.
-FILE_PER_TABLE	0
+FILE_PER_TABLE	1
+SPLIT_FILE      1
 
 # Allow function export to be saved in one file per function/procedure.
 # The files will be named as funcname_OUTPUT. Where OUTPUT is the value
