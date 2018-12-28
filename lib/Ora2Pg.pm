@@ -335,6 +335,10 @@ our @GRANTS = (
 	'TEMPORARY', 'TEMP', 'USAGE', 'ALL', 'ALL PRIVILEGES',
 	'EXECUTE'
 );
+#add by antdb
+my $first_column_name = undef;
+my $is_first = 0;
+#add end
 
 $SIG{'CHLD'} = 'DEFAULT';
 
@@ -1361,7 +1365,7 @@ sub _init
 	$self->{compile_schema} ||= 0;
 	$self->{export_invalid} ||= 0;
 	$self->{use_reserved_words} ||= 0;
-	$self->{pkey_in_create} ||= 0;
+	$self->{pkey_in_create} ||= 1;
 	$self->{security} = ();
 	# Should we add SET ON_ERROR_STOP to generated SQL files
 	$self->{stop_on_error} = 1 if (not defined $self->{stop_on_error});
@@ -6453,6 +6457,7 @@ sub export_table
 	{
 
 		$self->logit("Dumping table $table...\n", 1);
+		$is_first = 0;
 
 		if (!$self->{quiet} && !$self->{debug}) {
 			print STDERR $self->progress_bar($ib, $num_total_table, 25, '=', 'tables', "exporting $table" ), "\r";
@@ -6494,6 +6499,7 @@ sub export_table
 			$sql_output .= "\nCREATE$foreign $obj_type $tbname (\n";
 
 			# Extract column information following the Oracle position order
+
 			foreach my $k (sort { 
 					if (!$self->{reordering_columns}) {
 						$self->{tables}{$table}{column_info}{$a}[11] <=> $self->{tables}{$table}{column_info}{$b}[11];
@@ -6602,6 +6608,15 @@ sub export_table
 				$type = $self->{'modify_type'}{"\L$table\E"}{"\L$f->[0]\E"} if (exists $self->{'modify_type'}{"\L$table\E"}{"\L$f->[0]\E"});
 				$fname = $self->quote_object_name($fname);
 				$sql_output .= "\t$fname $type";
+
+				# add by antdb
+				if( $is_first == 0)
+				{
+					$is_first = 1;
+					$first_column_name = $fname;
+				}
+				# add end
+
 				if ($foreign && $self->is_primary_key_column($table, $f->[0])) {
 					 $sql_output .= " OPTIONS (key 'true')";
 				}
@@ -6694,6 +6709,13 @@ sub export_table
 			if ($self->{pkey_in_create}) {
 				$sql_output .= $self->_get_primary_keys($table, $self->{tables}{$table}{unique_key});
 			}
+
+			# add by antdb
+			if ($self->{ukey_in_create}) {
+				$sql_output .= $self->_get_unique_keys($table, $self->{tables}{$table}{unique_key});
+			}
+			# add end
+
 			$sql_output =~ s/,$//;
 			$sql_output .= ')';
 			if ($self->{tables}{$table}{table_info}{partitioned} && $self->{pg_supports_partition} && !$self->{disable_partition}) {
@@ -6752,6 +6774,11 @@ sub export_table
 				$sql_output .= "COMMENT ON COLUMN " .  $self->quote_object_name("$tbname.$fname") . " IS E'" . $self->{tables}{$table}{column_comments}{$f} .  "';\n";
 			}
 		}
+		# Change distribute by mode for AntDB by antdb
+		if( ($self->{distribute_by_mode} eq 'REPLICATION') || ($self->{distribute_by_mode} eq 'ROUNDROBIN') ){
+			$sql_output .= "\nALTER TABLE $tbname DISTRIBUTE BY $self->{distribute_by_mode};\n";
+		}
+		# add end
 
 		# Change ownership
 		if ($self->{force_owner}) {
@@ -6765,9 +6792,30 @@ sub export_table
 				$sql_output .= "$_;\n";
 			}
 		}
+
 		if ((!$self->{tables}{$table}{table_info}{partitioned} || $self->{disable_partition}) && $self->{type} ne 'FDW') {
 			# Set the indexes definition
-			my ($idx, $fts_idx) = $self->_create_indexes($table, 0, %{$self->{tables}{$table}{indexes}});
+			#add by antdb for create uniqure index "ERROR:  Cannot create index whose evaluation cannot be enforced to remote nodes"
+			$self->logit("Dumping index for table $table...\n", 1);
+			my $primary_keys .= $self->_get_primary_columms($table, $self->{tables}{$table}{unique_key});
+			my $unique_keys  .= $self->_get_unique_columms($table, $self->{tables}{$table}{unique_key});
+			$self->logit("Get primary keys ($primary_keys) and first column name($first_column_name) and unique constraint ($unique_keys) for table $table...\n", 1);
+			my $unique_index_for_adb = '';
+			if ( $primary_keys )
+			{
+				$unique_index_for_adb .= $primary_keys;
+			}
+			elsif ( $unique_keys )
+			{
+				$unique_index_for_adb .= $unique_keys;
+			}
+			else
+			{
+				$unique_index_for_adb .= $first_column_name;
+			}
+			my ($idx, $fts_idx) = $self->_create_indexes($table, 0,  $unique_index_for_adb, %{$self->{tables}{$table}{indexes}});
+			#add end
+			# my ($idx, $fts_idx) = $self->_create_indexes($table, 0, %{$self->{tables}{$table}{indexes}});
 			$indices .= "$idx\n" if ($idx);
 			$fts_indices .= "$fts_idx\n" if ($fts_idx);
 			if (!$self->{file_per_index}) {
@@ -8009,7 +8057,10 @@ and triggers to create for FTS indexes.
 =cut
 sub _create_indexes
 {
-	my ($self, $table, $indexonly, %indexes) = @_;
+	# add by antdb
+	my ($self, $table, $indexonly, $unique_index_for_adb, %indexes) = @_;
+	# add end
+
 
 	my $tbsaved = $table;
 	# The %indexes hash can be passed from table or materialized views definition
@@ -8270,6 +8321,22 @@ CREATE TRIGGER $trig_name BEFORE INSERT OR UPDATE
 				$str .= "-- CREATE$unique INDEX$concurrently " . $self->quote_object_name("$idxname$self->{indexes_suffix}")
 						. " ON $table ($columns)";
 			} else {
+			 if ($unique) {
+			 # add by antdb  在唯一索引列后面追加默认的分片键
+				my @arr_unique_index = split(/\s*,\s*/, $unique_index_for_adb);
+				my @arr_columns = split(/\s*,\s*/, $columns);
+				my @array3 = (@arr_columns, @arr_unique_index);
+				my @array3_new =();
+				foreach my $item ( @array3 )
+				{
+					if ( ! grep( /^$item$/, @array3_new ) )
+					{
+						push( @array3_new, $item );
+					}
+				}
+				$columns = join(',',@array3_new);
+				# add end 
+			 }
 				$str .= "CREATE$unique INDEX$concurrently " . $self->quote_object_name("$idxname$self->{indexes_suffix}")
 						. " ON $table ($columns)";
 			}
@@ -8478,6 +8545,139 @@ sub _get_primary_keys
 	return $out;
 }
 
+## add by antdb
+
+=head2 _get_unique_columms
+
+This function return Columms to add unique keys of a create index definition
+
+=cut
+sub _get_unique_columms
+{
+	my ($self, $table, $unique_key) = @_;
+
+	my $out = '';
+
+	my $tbsaved = $table;
+	$table = $self->get_replaced_tbname($table);
+
+	# Set the unique (and primary) key definition 
+	foreach my $consname (keys %$unique_key) {
+		next if ($self->{pkey_in_create} && ($unique_key->{$consname}{type} eq 'P'));
+		my $constype =   $unique_key->{$consname}{type};
+		my $constgen =   $unique_key->{$consname}{generated};
+		my $index_name = $unique_key->{$consname}{index_name};
+		my $deferrable = $unique_key->{$consname}{deferrable};
+		my $deferred = $unique_key->{$consname}{deferred};
+		my @conscols = @{$unique_key->{$consname}{columns}};
+		# Exclude unique index used in PK when column list is the same
+		next if (($constype eq 'U') && exists $pkcollist{$table} && ($pkcollist{$table} eq join(",", @conscols)));
+
+		my %constypenames = ('U' => 'UNIQUE', 'P' => 'PRIMARY KEY');
+		my $constypename = $constypenames{$constype};
+		for (my $i = 0; $i <= $#conscols; $i++) {
+			# Change column names
+			if (exists $self->{replaced_cols}{"\L$tbsaved\E"}{"\L$conscols[$i]\E"} && $self->{replaced_cols}{"\L$tbsaved\L"}{"\L$conscols[$i]\E"}) {
+				$conscols[$i] = $self->{replaced_cols}{"\L$tbsaved\E"}{"\L$conscols[$i]\E"};
+			}
+		}
+		map { $_ = $self->quote_object_name($_) } @conscols;
+
+		my $columnlist = join(',', @conscols);
+		if ($columnlist) {
+			$out .= "$columnlist";
+			$out .= ",";
+		}
+	}
+	return $out;
+}
+
+
+
+=head2 _get_primary_columms
+
+This function return Columms to add primary keys of a create index definition
+
+=cut
+sub _get_primary_columms
+{
+	my ($self, $table, $unique_key) = @_;
+
+	my $out = '';
+
+	# Set the unique (and primary) key definition 
+	foreach my $consname (keys %$unique_key) {
+		next if ($self->{pkey_in_create} && ($unique_key->{$consname}{type} ne 'P'));
+		my $constype =   $unique_key->{$consname}{type};
+		my $constgen =   $unique_key->{$consname}{generated};
+		my $index_name = $unique_key->{$consname}{index_name};
+		my @conscols = @{$unique_key->{$consname}{columns}};
+		my %constypenames = ('U' => 'UNIQUE', 'P' => 'PRIMARY KEY');
+		my $constypename = $constypenames{$constype};
+		for (my $i = 0; $i <= $#conscols; $i++) {
+			# Change column names
+			if (exists $self->{replaced_cols}{"\L$table\E"}{"\L$conscols[$i]\E"} && $self->{replaced_cols}{"\L$table\E"}{"\L$conscols[$i]\E"}) {
+				$conscols[$i] = $self->{replaced_cols}{"\L$table\E"}{"\L$conscols[$i]\E"};
+			}
+		}
+		map { $_ = $self->quote_object_name($_) } @conscols;
+
+		my $columnlist = join(',', @conscols);
+		if ($columnlist) {
+			$out .= "$columnlist";
+			$out .= ",";
+		}
+	}
+	$out =~ s/,$//s;
+
+	return $out;
+}
+
+
+sub _get_unique_keys
+{
+	my ($self, $table, $unique_key) = @_;
+
+	my $out = '';
+
+	# Set the unique (and primary) key definition 
+	foreach my $consname (keys %$unique_key) {
+		next if ($self->{ukey_in_create} && ($unique_key->{$consname}{type} ne 'U'));
+		my $constype =   $unique_key->{$consname}{type};
+		my $constgen =   $unique_key->{$consname}{generated};
+		my $index_name = $unique_key->{$consname}{index_name};
+		my @conscols = @{$unique_key->{$consname}{columns}};
+		my %constypenames = ('U' => 'UNIQUE');
+		my $constypename = $constypenames{$constype};
+		for (my $i = 0; $i <= $#conscols; $i++) {
+			# Change column names
+			if (exists $self->{replaced_cols}{"\L$table\E"}{"\L$conscols[$i]\E"} && $self->{replaced_cols}{"\L$table\E"}{"\L$conscols[$i]\E"}) {
+				$conscols[$i] = $self->{replaced_cols}{"\L$table\E"}{"\L$conscols[$i]\E"};
+			}
+		}
+		map { $_ = $self->quote_object_name($_) } @conscols;
+
+		my $columnlist = join(',', @conscols);
+		if ($columnlist) {
+			if ($self->{ukey_in_create}) {
+				if (!$self->{keep_pkey_names} || ($constgen eq 'GENERATED NAME')) {
+					$out .= "\tUNIQUE ($columnlist)";
+				} else {
+					$out .= "\tCONSTRAINT " .  $self->quote_object_name($consname) . " UNIQUE ($columnlist)";
+				}
+				if ($self->{use_tablespace} && $self->{tables}{$table}{idx_tbsp}{$index_name} && !grep(/^$self->{tables}{$table}{idx_tbsp}{$index_name}$/i, @{$self->{default_tablespaces}})) {
+					$out .= " USING INDEX TABLESPACE " .  $self->quote_object_name($self->{tables}{$table}{idx_tbsp}{$index_name});
+				}
+				$out .= ",\n";
+			}
+		}
+	}
+	$out =~ s/,$//s;
+
+	return $out;
+}
+
+## add end
 
 =head2 _create_unique_keys
 
@@ -8495,7 +8695,7 @@ sub _create_unique_keys
 
 	# Set the unique (and primary) key definition 
 	foreach my $consname (keys %$unique_key) {
-		next if ($self->{pkey_in_create} && ($unique_key->{$consname}{type} eq 'P'));
+		next if ( ($self->{pkey_in_create} && ($unique_key->{$consname}{type} eq 'P') ) || ( $self->{ukey_in_create} && ($unique_key->{$consname}{type} eq 'U') ) );  #change by antdb
 		my $constype =   $unique_key->{$consname}{type};
 		my $constgen =   $unique_key->{$consname}{generated};
 		my $index_name = $unique_key->{$consname}{index_name};
