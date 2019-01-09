@@ -1415,6 +1415,7 @@ sub _init
 	# add by antdb
 	$self->{temp_prefix} = 'exporting_';
 	$self->{temp_suffix} = '.tmp';
+	$self->{output} = $self->{output}||'.sql';
 	# add end	
 
 	if ($self->{debug}) {
