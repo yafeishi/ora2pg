@@ -6804,8 +6804,11 @@ sub export_table
 				$sql_output .= "$_;\n";
 			}
 		}
+		my $export_indexes = 1;
 
-		if ((!$self->{tables}{$table}{table_info}{partitioned} || $self->{disable_partition}) && $self->{type} ne 'FDW') {
+		if ((!$self->{tables}{$table}{table_info}{partitioned} || $self->{pg_version} >= 11
+				|| $self->{disable_partition}) && $self->{type} ne 'FDW')
+		{
 			# Set the indexes definition
 			#add by antdb for create uniqure index "ERROR:  Cannot create index whose evaluation cannot be enforced to remote nodes"
 			$self->logit("Dumping index for table $table...\n", 1);
