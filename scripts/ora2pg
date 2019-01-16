@@ -99,6 +99,8 @@ my @GRANT_OBJECTS_ARRAY = ('USER','TABLE','VIEW','MATERIALIZED VIEW','SEQUENCE',
 
 my $TMP_DIR      = File::Spec->tmpdir() || '/tmp';
 
+my $WHERE_OPTION = '';  #  add by antdb
+
 # Collect command line arguments
 GetOptions (
 	'a|allow=s' => \$ALLOW,
@@ -124,6 +126,7 @@ GetOptions (
 	's|source=s' => \$DSN,
         't|type=s' => \$EXPORT_TYPE,
         'T|temp_dir=s' => \$TMP_DIR,
+	'W|where_option=s' => \$WHERE_OPTION,
 	'u|user=s' => \$DBUSER,
 	'v|version!' => \$SHOW_VER,
 	'w|password=s' => \$DBPWD,
@@ -213,6 +216,30 @@ if ($FILE_CONF && ! -e $FILE_CONF) {
 
 push(@CAPABILITIES, @SCHEMA_ARRAY, @REPORT_ARRAY, @DATA_ARRAY, @EXTERNAL_ARRAY, @TEST_ARRAY);
 
+## Validate WHERE_OPTION  add by antdb
+$WHERE_OPTION = uc($WHERE_OPTION);
+my $var = $WHERE_OPTION;
+my %where_config = ();
+while ($var =~ s/([^\[\s]+)\s*\[([^\]]+)\]\s*//) 
+{
+	my $table = $1;
+	my $where = $2;
+	$where =~ s/^\s+//;
+	$where =~ s/\s+$//;
+	$where_config{where}{"\L$table\E"} = $where;
+}
+if ($var) 
+{
+	$where_config{global_where} = $var;
+}
+
+if( ($WHERE_OPTION) && (! %where_config))
+{
+	print "FATAL: Please reference the office document for WHERE rule\n";
+    &usage();
+}
+# add end
+
 # Validate export type
 $EXPORT_TYPE = uc($EXPORT_TYPE);
 $EXPORT_TYPE =~ s/DATA/COPY/;
@@ -261,6 +288,7 @@ $AUDIT_USER =~ s/[;\s]+/,/g;
 my $schema = new Ora2Pg (
 	config => $FILE_CONF || $CONFIG_FILE,
 	type   => $EXPORT_TYPE,
+	where_option => $WHERE_OPTION,  # add by antdb
 	debug  => $DEBUG,
 	logfile=> $LOGFILE,
 	output => $OUTFILE,
@@ -383,6 +411,7 @@ Usage: ora2pg [-dhpqv --estimate_cost --dump_as_html] [--option value]
     -s | --source DSN : Allow to set the Oracle DBI datasource.
     -t | --type export: Set the export type. It will override the one
 			given in the configuration file (TYPE).
+    -W | --where_option: Allow to set the filter condition.
     -T | --temp_dir DIR: Set a distinct temporary directory when two
                          or more ora2pg are run in parallel.
     -u | --user name  : Set the Oracle database connection user.
@@ -826,6 +855,7 @@ while getopts "b:d:e:h:j:l:n:o:p:P:t:U:aDfiIsyx?"  opt; do
         P) PARALLEL_TABLES=" -P $OPTARG";;
         s) SCHEMA_ONLY=1;;
         t) EXPORT_TYPE=$OPTARG;;
+		W) WHERE_OPTION=$OPTARG;;
         U) DB_USER=" -U $OPTARG";;
 	x) IMPORT_INDEXES_AFTER=1;;
         y) AUTORUN=1;;

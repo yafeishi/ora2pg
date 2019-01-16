@@ -9000,6 +9000,26 @@ sub _howto_get_data
 {
 	my ($self, $table, $name, $type, $src_type, $part_name, $is_subpart) = @_;
 
+	#add by antdb 
+	$self->logit("command where option=".$self->{where_option}."\n");
+	if( $self->{where_option} ne '')
+	{
+		$val = $self->{where_option};
+		while ($val =~ s/([^\[\s]+)\s*\[([^\]]+)\]\s*//) 
+		{
+			my $table = $1;
+			my $where = $2;
+			$where =~ s/^\s+//;
+			$where =~ s/\s+$//;
+			$self->{where}{"\L$table\E"} = $where;
+		}
+		if ($val) 
+		{
+			$self->{global_where} = $val;
+		}
+	}
+	#add end
+
 	# Fix a problem when the table need to be prefixed by the schema
 	my $realtable = $table;
 	$realtable =~ s/\"//g;
