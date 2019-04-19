@@ -43,7 +43,7 @@ FEATURES
             - Export Oracle views as PG tables.
             - Export Oracle user defined types.
             - Provide some basic automatic conversion of PLSQL code to PLPGSQL.
-            - Works on any plateform.
+            - Works on any platform.
             - Export Oracle tables as foreign data wrapper tables.
             - Export materialized view.
             - Show a detailled report of an Oracle database content.
@@ -178,7 +178,7 @@ INSTALLATION
     root user, install DBD::Oracle. Proceed as follow:
 
             export LD_LIBRARY_PATH=/usr/lib/oracle/12.2/client64/lib
-            export ORACLE_HOME=/usr/lib/oracle/12.2/client64/lib
+            export ORACLE_HOME=/usr/lib/oracle/12.2/client64
             perl -MCPAN -e 'install DBD::Oracle'
 
     If you are running for the first time it will ask many questions; you
@@ -190,8 +190,8 @@ INSTALLATION
             cpan> get DBD::Oracle
             cpan> quit
             cd ~/.cpan/build/DBD-Oracle*
-            export LD_LIBRARY_PATH=/usr/lib/oracle/11.2/client64/lib
-            export ORACLE_HOME=/usr/lib/oracle/11.2/client64/lib
+            export LD_LIBRARY_PATH=/usr/lib/oracle/12.2/client64/lib
+            export ORACLE_HOME=/usr/lib/oracle/12.2/client64
             perl Makefile.PL
             make
             make install
@@ -2645,7 +2645,9 @@ CONFIGURATION
 
     Usage: ora2pg_scanner -l CSVFILE [-o OUTDIR]
 
-       -c | --config FILE : set custom configuration file to use otherwise ora2pg
+       -b | --binpath DIR: full path to directory where the ora2pg binary stays.
+                    Might be useful only on Windows OS.
+       -c | --config FILE: set custom configuration file to use otherwise ora2pg
                     will use the default: /etc/ora2pg/ora2pg.conf.
        -l | --list FILE : CSV file containing a list of databases to scan with
                     all required information. The first line of the file
@@ -2686,6 +2688,10 @@ CONFIGURATION
 
     Hint: Use the -t | --test option before to test all your connections in
     your CSV file.
+
+    For Windows users you must use the -b command line option to set the
+    directory where ora2pg_scanner stays otherwise the ora2pg command calls
+    will fail.
 
   Migration assessment method
     Migration unit scores given to each type of Oracle database object are

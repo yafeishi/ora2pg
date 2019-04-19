@@ -42,7 +42,7 @@ use Benchmark;
 #set locale to LC_NUMERIC C
 setlocale(LC_NUMERIC,"C");
 
-$VERSION = '19.1';
+$VERSION = '20.0';
 $PSQL = $ENV{PLSQL} || 'psql';
 
 $| = 1;
@@ -545,6 +545,7 @@ sub create_export_file
 				$outfile = $self->{output_dir} . "/" . $outfile;
 			}
 		}
+
 		# Send output to the specified file
 		if ($outfile =~ /\.gz$/)
 		{
@@ -612,7 +613,7 @@ sub append_export_file
 			$outfile = $self->{output_dir} . '/' . $outfile;
 		}
 		# If user request data compression
-		if ($self->{compress}) {
+		if ($self->{compress} && (($self->{jobs} > 1) || ($self->{oracle_copies} > 1))) {
 			die "FATAL: you can't use compressed output with parallel dump\n";
 		} else {
 			$filehdl = new IO::File;
@@ -649,12 +650,12 @@ Close a file handle.
 
 sub close_export_file
 {
-	my ($self, $filehdl) = @_;
+	my ($self, $filehdl, $not_compressed) = @_;
 
 
 	return if (!defined $filehdl);
 
-	if ($self->{output} =~ /\.gz$/) {
+	if (!$not_compressed && $self->{output} =~ /\.gz$/) {
 		$filehdl->gzclose();
 	} else {
 		$filehdl->close();
@@ -945,7 +946,7 @@ sub _init
 
 	# Set default system user/schema to not export. Most of them are extracted from this doc:
 	# http://docs.oracle.com/cd/E11882_01/server.112/e10575/tdpsg_user_accounts.htm#TDPSG20030
-	push(@{$self->{sysusers}},'SYSTEM','CTXSYS','DBSNMP','EXFSYS','LBACSYS','MDSYS','MGMT_VIEW','OLAPSYS','ORDDATA','OWBSYS','ORDPLUGINS','ORDSYS','OUTLN','SI_INFORMTN_SCHEMA','SYS','SYSMAN','WK_TEST','WKSYS','WKPROXY','WMSYS','XDB','APEX_PUBLIC_USER','DIP','FLOWS_020100','FLOWS_030000','FLOWS_040100','FLOWS_010600','FLOWS_FILES','MDDATA','ORACLE_OCM','SPATIAL_CSW_ADMIN_USR','SPATIAL_WFS_ADMIN_USR','XS$NULL','PERFSTAT','SQLTXPLAIN','DMSYS','TSMSYS','WKSYS','APEX_040200','DVSYS','OJVMSYS','GSMADMIN_INTERNAL','APPQOSSYS','DVSYS','DVF','AUDSYS','APEX_030200','MGMT_VIEW','ODM','ODM_MTR','TRACESRV','MTMSYS','OWBSYS_AUDIT','WEBSYS','WK_PROXY','OSE$HTTP$ADMIN','AURORA$JIS$UTILITY$','AURORA$ORB$UNAUTHENTICATED','DBMS_PRIVILEGE_CAPTURE','CSMIG');
+	push(@{$self->{sysusers}},'SYSTEM','CTXSYS','DBSNMP','EXFSYS','LBACSYS','MDSYS','MGMT_VIEW','OLAPSYS','ORDDATA','OWBSYS','ORDPLUGINS','ORDSYS','OUTLN','SI_INFORMTN_SCHEMA','SYS','SYSMAN','WK_TEST','WKSYS','WKPROXY','WMSYS','XDB','APEX_PUBLIC_USER','DIP','FLOWS_020100','FLOWS_030000','FLOWS_040100','FLOWS_010600','FLOWS_FILES','MDDATA','ORACLE_OCM','SPATIAL_CSW_ADMIN_USR','SPATIAL_WFS_ADMIN_USR','XS$NULL','PERFSTAT','SQLTXPLAIN','DMSYS','TSMSYS','WKSYS','APEX_040000','APEX_040200','DVSYS','OJVMSYS','GSMADMIN_INTERNAL','APPQOSSYS','DVSYS','DVF','AUDSYS','APEX_030200','MGMT_VIEW','ODM','ODM_MTR','TRACESRV','MTMSYS','OWBSYS_AUDIT','WEBSYS','WK_PROXY','OSE$HTTP$ADMIN','AURORA$JIS$UTILITY$','AURORA$ORB$UNAUTHENTICATED','DBMS_PRIVILEGE_CAPTURE','CSMIG');
 
 	# Set default tablespace to exclude when using USE_TABLESPACE
 	push(@{$self->{default_tablespaces}}, 'TEMP', 'USERS','SYSTEM');
@@ -1203,6 +1204,11 @@ sub _init
 		$self->{is_mysql} = 1;
 	}
 
+	if ($self->{is_mysql}) {
+		# MySQL do not supports this syntax fallback to read committed
+		$self->{transaction} =~ s/(READ ONLY|READ WRITE)/ISOLATION LEVEL READ COMMITTED/;
+	}
+
 	# Set Oracle, Perl and PostgreSQL encoding that will be used
 	$self->_init_environment();
 
@@ -1323,7 +1329,7 @@ sub _init
 		$self->{pg_supports_identity} = 1;
 	}
 	if ($self->{pg_version} >= 11) {
-		$self->{pg_supports_procedure} = 0;
+		$self->{pg_supports_procedure} = 1;
 	}
 
 	# Other PostgreSQL fork compatibility
@@ -1632,6 +1638,7 @@ sub _oracle_connection
 			LongReadLen=>$self->{longreadlen},
 			LongTruncOk=>$self->{longtruncok},
 			AutoInactiveDestroy => 1,
+			PrintError => 0
 		}
 	);
 
@@ -1650,6 +1657,20 @@ sub _oracle_connection
 	$sth->finish();
 	chomp($self->{db_version});
 	$self->{db_version} =~ s/ \- .*//;
+
+	# Check if the connection user has the DBA privilege
+	$sth = $dbh->prepare( "SELECT 1 FROM DBA_ROLE_PRIVS" );
+	if (!$sth) {
+		my $ret = $dbh->err;
+		if ($ret == 942 && $self->{prefix} eq 'DBA') {
+			$self->logit("HINT: you should activate USER_GRANTS for a connection without DBA privilege. Continuing with USER privilege.\n");
+			# No DBA privilege, set use of ALL_* tables instead of DBA_* tables
+			$self->{prefix} = 'ALL';
+			$self->{user_grants} = 1;
+		}
+	} else {
+		$sth->finish();
+	}
 
 	# Fix a problem when exporting type LONG and LOB
 	$dbh->{'LongReadLen'} = $self->{longreadlen};
@@ -1982,7 +2003,7 @@ sub _types
 	my ($self) = @_;
 
 	$self->logit("Retrieving user defined types information...\n", 1);
-	$self->{types} = $self->_get_types($self->{dbh});
+	$self->{types} = $self->_get_types();
 
 }
 
@@ -3601,7 +3622,9 @@ sub translate_function
 		}
 		$self->logit("Dumping function $fct...\n", 1);
 		if ($self->{file_per_function}) {
-			$self->dump("\\i $dirprefix${fct}_$self->{output}\n");
+			my $f = "$dirprefix${fct}_$self->{output}";
+			$f =~ s/\.(?:gz|bz2)$//i;
+			$self->dump("\\i $f\n");
 			$self->save_filetoupdate_list("ORA2PG_$self->{type}", lc($fct), "$dirprefix${fct}_$self->{output}");
 		} else {
 			$self->save_filetoupdate_list("ORA2PG_$self->{type}", lc($fct), "$dirprefix$self->{output}");
@@ -3615,7 +3638,7 @@ sub translate_function
 		if ($self->{file_per_function}) {
 			$self->logit("Dumping to one file per function : ${fct}_$self->{output}\n", 1);
 			$fhdl = $self->open_export_file("${fct}_$self->{output}");
-			$self->set_binmode($fhdl);
+			$self->set_binmode($fhdl) if (!$self->{compress});
 		}
 		if ($self->{plsql_pgsql}) {
 			my $sql_f = '';
@@ -3646,7 +3669,7 @@ sub translate_function
 						my $tfh = $self->append_export_file($dirprefix . 'temp_cost_file.dat', 1);
 						flock($tfh, 2) || die "FATAL: can't lock file temp_cost_file.dat\n";
 						$tfh->print("${fct}:$lsize:$lcost\n");
-						$self->close_export_file($tfh);
+						$self->close_export_file($tfh, 1);
 					}
 				}
 			}
@@ -3658,8 +3681,13 @@ sub translate_function
 			$sql_output =~ s/(-- REVOKE ALL ON (?:FUNCTION|PROCEDURE) [^;]+ FROM PUBLIC;)/&remove_newline($1)/sge;
 		}
 
+<<<<<<< HEAD
 	my $sql_header = "-- Generated by Ora2Pg for AntDB, the Oracle database Schema converter, version $VERSION\n";
 	$sql_header .= "-- Copyright 2000-2019 Gilles DAROLD. All rights reserved.\n";
+=======
+		my $sql_header = "-- Generated by Ora2Pg, the Oracle database Schema converter, version $VERSION\n";
+		$sql_header .= "-- Copyright 2000-2019 Gilles DAROLD. All rights reserved.\n";
+>>>>>>> 0331abd87c6596e6f00cecb39501f4d426bb6b1b
 		$sql_header .= "-- DATASOURCE: $self->{oracle_dsn}\n\n";
 		if ($self->{client_encoding}) {
 			$sql_header .= "SET client_encoding TO '\U$self->{client_encoding}\E';\n\n";
@@ -3727,7 +3755,7 @@ sub save_filetoupdate_list
 	my $tfh = $self->append_export_file($dirprefix . 'temp_pass2_file.dat', 1);
 	flock($tfh, 2) || die "FATAL: can't lock file temp_pass2_file.dat\n";
 	$tfh->print("${pname}:${ftcname}:$file_name\n");
-	$self->close_export_file($tfh);
+	$self->close_export_file($tfh, 1);
 }
 
 =head2 _set_file_header
@@ -3797,7 +3825,7 @@ sub export_view
 			$self->dump("\\i $file_name\n");
 			$self->logit("Dumping to one file per view : ${view}_$self->{output}\n", 1);
 			$fhdl = $self->open_export_file("${view}_$self->{output}");
-			$self->set_binmode($fhdl);
+			$self->set_binmode($fhdl) if (!$self->{compress});
 			$self->save_filetoupdate_list("ORA2PG_$self->{type}", lc($view), $file_name);
 		} else {
 			$self->save_filetoupdate_list("ORA2PG_$self->{type}", lc($view), "$dirprefix$self->{output}");
@@ -4056,7 +4084,7 @@ LANGUAGE plpgsql ;
 			$self->dump("\\i $file_name\n");
 			$self->logit("Dumping to one file per materialized view : ${view}_$self->{output}\n", 1);
 			$fhdl = $self->open_export_file("${view}_$self->{output}");
-			$self->set_binmode($fhdl);
+			$self->set_binmode($fhdl) if (!$self->{compress});
 			$self->save_filetoupdate_list("ORA2PG_$self->{type}", lc($view), $file_name);
 		} else {
 			$self->save_filetoupdate_list("ORA2PG_$self->{type}", lc($view), "$dirprefix$self->{output}");
@@ -4480,10 +4508,12 @@ sub export_trigger
 		}
 		my $fhdl = undef;
 		if ($self->{file_per_function}) {
-			$self->dump("\\i $dirprefix$trig->[0]_$self->{output}\n");
+			my $f = "$dirprefix$trig->[0]_$self->{output}";
+			$f =~ s/\.(?:gz|bz2)$//i;
+			$self->dump("\\i $f\n");
 			$self->logit("Dumping to one file per trigger : $trig->[0]_$self->{output}\n", 1);
 			$fhdl = $self->open_export_file("$trig->[0]_$self->{output}");
-			$self->set_binmode($fhdl);
+			$self->set_binmode($fhdl) if (!$self->{compress});
 			$self->save_filetoupdate_list("ORA2PG_$self->{type}", lc($trig->[0]), "$dirprefix$trig->[0]_$self->{output}");
 		} else {
 			$self->save_filetoupdate_list("ORA2PG_$self->{type}", lc($trig->[0]), "$dirprefix$self->{output}");
@@ -5033,7 +5063,7 @@ sub export_function
 				$total_size += $fsize;
 				$cost_value += $fcost;
 			}
-			$self->close_export_file($tfh);
+			$self->close_export_file($tfh, 1);
 			unlink($dirprefix . 'temp_cost_file.dat');
 		}
 	}
@@ -5219,7 +5249,7 @@ sub export_procedure
 					$total_size += $fsize;
 					$cost_value += $fcost;
 				}
-				$self->close_export_file($tfh);
+				$self->close_export_file($tfh, 1);
 			}
 			unlink($dirprefix . 'temp_cost_file.dat');
 		}
@@ -5376,9 +5406,11 @@ sub export_package
 		if (!$self->{plsql_pgsql}) {
 			$self->logit("Dumping package $pkg...\n", 1);
 			if ($self->{file_per_function}) {
-				$pkgbody = "\\i $dirprefix\L${pkg}\E_$self->{output}\n";
+				my $f = "$dirprefix\L${pkg}\E_$self->{output}";
+				$f =~ s/\.(?:gz|bz2)$//i;
+				$pkgbody = "\\i $f\n";
 				my $fhdl = $self->open_export_file("$dirprefix\L${pkg}\E_$self->{output}", 1);
-				$self->set_binmode($fhdl);
+				$self->set_binmode($fhdl) if (!$self->{compress});
 				$self->dump($sql_header . $self->{packages}{$pkg}{text}, $fhdl);
 				$self->close_export_file($fhdl);
 			} else {
@@ -5625,7 +5657,7 @@ sub export_tablespace
 		my $fhdl = undef;
 		$self->logit("Dumping tablespace alter indexes to one separate file : TBSP_INDEXES_$self->{output}\n", 1);
 		$fhdl = $self->open_export_file("TBSP_INDEXES_$self->{output}");
-		$self->set_binmode($fhdl);
+		$self->set_binmode($fhdl) if (!$self->{compress});
 		$sql_output = '';
 		foreach my $tb_type (sort keys %{$self->{tablespaces}}) {
 			# TYPE - TABLESPACE_NAME - FILEPATH - OBJECT_NAME
@@ -6333,7 +6365,7 @@ FOR EACH ROW EXECUTE PROCEDURE $trg();
 		$sql_header .= "-- DATASOURCE: $self->{oracle_dsn}\n\n";
 		$sql_header = ''  if ($self->{no_header});
 		$fhdl = $self->open_export_file("PARTITION_INDEXES_$self->{output}");
-		$self->set_binmode($fhdl);
+		$self->set_binmode($fhdl) if (!$self->{compress});
 		$self->dump($sql_header . $partition_indexes, $fhdl);
 		$self->close_export_file($fhdl);
 	}
@@ -6710,6 +6742,14 @@ sub export_table
 										}
 									}
 								}
+								else
+								{
+									my @c =  $f->[4] =~ /\./g;
+									if ($#c >= 1)
+									{
+										$f->[4] = "'$f->[4]'";
+									}
+								}
 								$f->[4] = 'NULL' if ($f->[4] eq "''" && $type =~ /int|double|numeric/i);
 								$sql_output .= " DEFAULT $f->[4]";
 							}
@@ -6895,7 +6935,7 @@ LANGUAGE PLPGSQL;
 		$sequence_output .= "DROP FUNCTION ora2pg_upd_autoincrement_seq(text, text);\n";
 		$self->logit("Dumping DDL to restart autoincrement sequences into separate file : AUTOINCREMENT_$self->{output}\n", 1);
 		$fhdl = $self->open_export_file("AUTOINCREMENT_$self->{output}");
-		$self->set_binmode($fhdl);
+		$self->set_binmode($fhdl) if (!$self->{compress});
 		$sequence_output = $self->set_search_path() . $sequence_output;
 		$self->dump($sql_header . $sequence_output, $fhdl);
 		$self->close_export_file($fhdl);
@@ -6906,7 +6946,7 @@ LANGUAGE PLPGSQL;
 		my $fhdl = undef;
 		$self->logit("Dumping indexes to one separate file : INDEXES_$self->{output}\n", 1);
 		$fhdl = $self->open_export_file("INDEXES_$self->{output}");
-		$self->set_binmode($fhdl);
+		$self->set_binmode($fhdl) if (!$self->{compress});
 		$indices = "-- Nothing found of type indexes\n" if (!$indices && !$self->{no_header});
 		$indices =~ s/\n+/\n/gs;
 		$self->_restore_comments(\$indices);
@@ -6941,7 +6981,7 @@ RETURNS text AS
 			# FTS TRIGGERS are exported in a separated file to be able to parallelize index creation
 			$self->logit("Dumping triggers for FTS indexes to one separate file : FTS_INDEXES_$self->{output}\n", 1);
 			$fhdl = $self->open_export_file("FTS_INDEXES_$self->{output}");
-			$self->set_binmode($fhdl);
+			$self->set_binmode($fhdl) if (!$self->{compress});
 			$self->_restore_comments(\$fts_indices);
 			$fts_indices = $self->set_search_path() . $fts_indices;
 			$self->dump($sql_header. $unaccent . $fts_indices, $fhdl);
@@ -6978,7 +7018,7 @@ RETURNS text AS
 		my $fhdl = undef;
 		$self->logit("Dumping constraints to one separate file : CONSTRAINTS_$self->{output}\n", 1);
 		$fhdl = $self->open_export_file("CONSTRAINTS_$self->{output}");
-		$self->set_binmode($fhdl);
+		$self->set_binmode($fhdl) if (!$self->{compress});
 		$constraints = "-- Nothing found of type constraints\n" if (!$constraints && !$self->{no_header});
 		$self->_restore_comments(\$constraints);
 		$self->dump($sql_header . $constraints, $fhdl);
@@ -6991,7 +7031,7 @@ RETURNS text AS
 		my $fhdl = undef;
 		$self->logit("Dumping foreign keys to one separate file : FKEYS_$self->{output}\n", 1);
 		$fhdl = $self->open_export_file("FKEYS_$self->{output}");
-		$self->set_binmode($fhdl);
+		$self->set_binmode($fhdl) if (!$self->{compress});
 		$fkeys = "-- Nothing found of type foreign keys\n" if (!$fkeys && !$self->{no_header});
 		$self->_restore_comments(\$fkeys);
 		$fkeys = $self->set_search_path() . $fkeys;
@@ -7048,7 +7088,7 @@ CREATE TRIGGER $tname
 			my $fhdl = undef;
 			$self->logit("Dumping virtual column triggers to one separate file : VIRTUAL_COLUMNS_$self->{output}\n", 1);
 			$fhdl = $self->open_export_file("VIRTUAL_COLUMNS_$self->{output}");
-			$self->set_binmode($fhdl);
+			$self->set_binmode($fhdl) if (!$self->{compress});
 			$self->dump($sql_header . $trig_out, $fhdl);
 			$self->close_export_file($fhdl);
 		}
@@ -8116,6 +8156,7 @@ sub _create_indexes
 		my @strings = ();
 		my $i = 0;
 		for (my $j = 0; $j <= $#{$indexes{$idx}}; $j++) {
+			$indexes{$idx}->[$j] =~ s/''/%%ESCAPED_STRING%%/g;
 			while ($indexes{$idx}->[$j] =~ s/'([^']+)'/%%string$i%%/) {
 				push(@strings, $1);
 				$i++;
@@ -8225,7 +8266,7 @@ sub _create_indexes
 				$idxname =~ s/"//g;
 				my @collist = @{$indexes{$idx}};
 				# Remove double quote, DESC and parenthesys
-				map { s/"//g; s/.*\(([^\)]+)\).*/$1/; s/\s+DESC//i; } @collist;
+				map { s/"//g; s/.*\(([^\)]+)\).*/$1/; s/\s+DESC//i; s/::.*//; } @collist;
 				$idxname = $idxname . '_' . join('_', @collist);
 				$idxname =~ s/\s+//g;
 				if ($self->{indexes_suffix}) {
@@ -10381,6 +10422,9 @@ AND    IC.TABLE_OWNER = ?
 			if ($row->[-1] eq 'DESC') {
 				$row->[1] .= " DESC";
 			}
+		} else {
+                        # Quote column with unsupported symbols
+                        $row->[1] = $self->quote_object_name($row->[1]);
 		}
 
 		$row->[1] =~ s/SYS_EXTRACT_UTC\s*\(([^\)]+)\)/$1/isg;
@@ -11495,7 +11539,7 @@ Returns a hash of all type names with their code.
 
 sub _get_types
 {
-	my ($self, $dbh, $name) = @_;
+	my ($self, $name) = @_;
 
 	# Retrieve all user defined types
 	my $str = "SELECT DISTINCT OBJECT_NAME,OWNER,OBJECT_ID FROM $self->{prefix}_OBJECTS WHERE OBJECT_TYPE='TYPE'";
@@ -11514,8 +11558,8 @@ sub _get_types
 	}
 	$str .= " ORDER BY OBJECT_NAME";
 
-	my $sth = $dbh->prepare($str) or $self->logit("FATAL: " . $dbh->errstr . "\n", 0, 1);
-	$sth->execute(@{$self->{query_bind_params}}) or $self->logit("FATAL: " . $dbh->errstr . "\n", 0, 1);
+	my $sth = $self->{dbh}->prepare($str) or $self->logit("FATAL: " . $self->{dbh}->errstr . "\n", 0, 1);
+	$sth->execute(@{$self->{query_bind_params}}) or $self->logit("FATAL: " . $self->{dbh}->errstr . "\n", 0, 1);
 
 	my @types = ();
 	my @fct_done = ();
@@ -11528,11 +11572,12 @@ sub _get_types
 		next if (grep(/^$row->[0]$/, @fct_done));
 		push(@fct_done, $row->[0]);
 		my %tmp = ();
-		my $sth2 = $dbh->prepare($sql) or $self->logit("FATAL: " . $dbh->errstr . "\n", 0, 1);
+		my $sth2 = $self->{dbh}->prepare($sql) or $self->logit("FATAL: " . $self->{dbh}->errstr . "\n", 0, 1);
 		$sth2->execute or $self->logit("FATAL: " . $sth2->errstr . "\n", 0, 1);
 		while (my $r = $sth2->fetch) {
 			$tmp{code} .= $r->[0];
 		}
+		$sth2->finish();
 		$tmp{name} = $row->[0];
 		$tmp{owner} = $row->[1];
 		$tmp{pos} = $row->[2];
@@ -11542,6 +11587,7 @@ sub _get_types
 		}
 		push(@types, \%tmp);
 	}
+	$sth->finish();
 
 	return \@types;
 }
@@ -12359,13 +12405,17 @@ sub _get_custom_types
 	my %types_found = ();
 	my @type_def = split(/\s*,\s*/, $str);
 	foreach my $s (@type_def) {
-		$s =~ /^\s*([^\s]+)\s+([^\s]+)/;
-		my $cur_type = $2;
+		my $cur_type = '';
+		if ($s =~ /\s+OF\s+([^\s;]+)/) {
+			$cur_type = $1;
+		} elsif ($s =~ /^\s*([^\s]+)\s+([^\s]+)/) {
+			$cur_type = $2;
+		}
 		push(@{$types_found{src_types}}, $cur_type);
 		if (exists $all_types{$cur_type}) {
 			push(@{$types_found{pg_types}}, $all_types{$cur_type});
 		} else {
-			my $custom_type = $self->_get_types($self->{dbh}, $cur_type);
+			my $custom_type = $self->_get_types($cur_type);
 			foreach my $tpe (sort {length($a->{name}) <=> length($b->{name}) } @{$custom_type}) {
 				last if (uc($tpe->{name}) eq $cur_type); # prevent infinit loop
 				$self->logit("\tLooking inside nested custom type $tpe->{name} to extract values...\n", 1);
@@ -12747,6 +12797,8 @@ sub dump
 {
 	my ($self, $data, $fh) = @_;
 
+	return if (!defined $data || $data eq '');
+
 	if (!$self->{compress}) {
 		if (defined $fh) {
 			$fh->print($data);
@@ -12757,9 +12809,9 @@ sub dump
 		}
 	} elsif ($self->{compress} eq 'Zlib') {
 		if (not defined $fh) {
-			$self->{fhout}->gzwrite($data) or $self->logit("FATAL: error writing compressed data\n", 0, 1);
+			$self->{fhout}->gzwrite($data) or $self->logit("FATAL: error dumping compressed data\n", 0, 1);
 		} else {
-			$fh->gzwrite($data) or $self->logit("FATAL: error writing compressed data\n", 0, 1);
+			$fh->gzwrite($data) or $self->logit("FATAL: error dumping compressed data\n", 0, 1);
 		}
 	} elsif (defined $self->{fhout}) {
 		 $self->{fhout}->print($data);
@@ -12780,6 +12832,9 @@ sub data_dump
 	my ($self, $data, $tname, $pname,$fileno,$is_rename) = @_;  # change by antdb
 
 	return if ($self->{oracle_speed});
+
+	# get out of here if there is no data to dump
+	return if (not defined $data or $data eq '');
 
 	my $dirprefix = '';
 	$dirprefix = "$self->{output_dir}/" if ($self->{output_dir});
@@ -12802,8 +12857,10 @@ sub data_dump
 		$self->logit("Dumping data from $rname to file: $dirprefix$filename\n", 1);
 	}	
 
-	if ( ($self->{jobs} > 1) || ($self->{oracle_copies} > 1) ) {
+	if ( ($self->{jobs} > 1) || ($self->{oracle_copies} > 1) )
+	{
 		$self->close_export_file($self->{fhout}) if (defined $self->{fhout} && !$self->{file_per_table} && !$self->{pg_dsn});
+<<<<<<< HEAD
 		if(!$self->{split_file}){
 			my $fh = $self->append_export_file($filename);
 			$self->set_binmode($fh);
@@ -12898,6 +12955,38 @@ sub data_dump
 						rename("$dirprefix$filename", "$dirprefix$relfilename");
 					}
 				}
+=======
+		my $fh = $self->append_export_file($filename);
+		$self->set_binmode($fh) if (!$self->{compress});
+		flock($fh, 2) || die "FATAL: can't lock file $dirprefix$filename\n";
+		$fh->print($data);
+		$self->close_export_file($fh);
+		$self->logit("Written " . length($data) . " bytes to $dirprefix$filename\n", 1);
+		# Reopen default output file
+		$self->create_export_file() if (defined $self->{fhout} && !$self->{file_per_table} && !$self->{pg_dsn});
+	}
+	elsif ($self->{file_per_table})
+	{
+		if ($pname)
+		{
+			my $fh = $self->append_export_file($filename);
+			$self->set_binmode($fh) if (!$self->{compress});
+			$fh->print($data);
+			$self->close_export_file($fh);
+			$self->logit("Written " . length($data) . " bytes to $dirprefix$filename\n", 1);
+		}
+		else
+		{
+			$self->{cfhout} = $self->open_export_file($filename) if (!defined $self->{cfhout});
+			if ($self->{compress} eq 'Zlib')
+			{
+				$self->{cfhout}->gzwrite($data) or $self->logit("FATAL: error writing compressed data into $filename :: $self->{cfhout}\n", 0, 1);
+			}
+			else
+			{
+				$self->set_binmode($self->{cfhout}) if (!$self->{compress});
+				$self->{cfhout}->print($data);
+>>>>>>> 0331abd87c6596e6f00cecb39501f4d426bb6b1b
 			}
 		}	# add end
 	} else {
@@ -13283,11 +13372,13 @@ sub _restore_comments
 		delete $self->{comment_values}{$id};
 	};
 
+	# Restore start comment in a constant string
+	$$content =~ s/\%OPEN_COMMENT\%/\/\*/gs;
+
 	if ($self->{string_constant_regexp}) {
 		# Replace potential text values that was replaced in comments
 		$self->_restore_text_constant_part($content);
 	}
-
 }
 
 =head2 _remove_comments
@@ -13300,6 +13391,9 @@ to allow easy parsing
 sub _remove_comments
 {
 	my ($self, $content, $no_constant) = @_;
+
+	# Fix comment in a string constant
+	while ($$content =~ s/('[^';\n]*)\/\*([^';\n]*')/$1\%OPEN_COMMENT\%$2/s) {};
 
 	# Fix unterminated comment at end of the code
 	$$content =~ s/(\/\*(?:(?!\*\/).)*)$/$1 \*\//s;
@@ -13771,13 +13865,15 @@ END;
 		$sql_header = '' if ($self->{no_header});
 
 		my $fhdl = $self->open_export_file("$dirprefix\L$pname/$fname\E_$self->{output}", 1);
-		$self->set_binmode($fhdl);
+		$self->set_binmode($fhdl) if (!$self->{compress});
 		$self->_restore_comments(\$function);
 		$self->normalize_function_call(\$function);
 		$function =~ s/(-- REVOKE ALL ON (?:FUNCTION|PROCEDURE) [^;]+ FROM PUBLIC;)/&remove_newline($1)/sge;
 		$self->dump($sql_header . $function, $fhdl);
 		$self->close_export_file($fhdl);
-		$function = "\\i $dirprefix\L$pname/$fname\E_$self->{output}\n";
+		my $f = "$dirprefix\L$pname/$fname\E_$self->{output}";
+		$f =~ s/\.(?:gz|bz2)$//i;
+		$function = "\\i $f\n";
 		$self->save_filetoupdate_list(lc($pname), lc($fname), "$dirprefix\L$pname/$fname\E_$self->{output}");
 		return $function;
 	} elsif ($pname) {
@@ -14178,6 +14274,18 @@ sub ask_for_data
 		$tt->[$i] = $self->{'modify_type'}{"\L$table\E"}{"\L$colname\E"} if (exists $self->{'modify_type'}{"\L$table\E"}{"\L$colname\E"});
 	}
 
+	# Look for user defined type
+	if (!$self->{is_mysql}) {
+		for (my $idx = 0; $idx < scalar(@$stt); $idx++) {
+			my $data_type = uc($stt->[$idx]) || '';
+			$data_type =~ s/\(.*//; # remove any precision
+			# in case of user defined type try to gather the underlying base types
+			if (!exists $self->{data_type}{$data_type} && !exists $self->{user_type}{$stt->[$idx]}) {
+				%{ $self->{user_type}{$stt->[$idx]} } = $self->custom_type_definition($stt->[$idx]);
+			}
+		}
+	}
+
 	if ( ($self->{oracle_copies} > 1) && $self->{defined_pk}{"\L$table\E"} ) {
 		$self->{ora_conn_count} = 0;
 		while ($self->{ora_conn_count} < $self->{oracle_copies}) {
@@ -14225,7 +14333,7 @@ sub custom_type_definition
 		} else {
 			$self->logit("\tData type $custom_type nested from type $parent is not native, searching on custom types.\n", 1);
 		}
-		$custom_type = $self->_get_types($self->{dbh}, $custom_type);
+		$custom_type = $self->_get_types($custom_type);
 		foreach my $tpe (sort {length($a->{name}) <=> length($b->{name}) } @{$custom_type}) {
 			$self->logit("\tLooking inside custom type $tpe->{name} to extract values...\n", 1);
 			my %types_def = $self->_get_custom_types($tpe->{code});
@@ -14289,9 +14397,9 @@ sub _extract_data
 			my $data_type = uc($stt->[$idx]) || '';
 			$data_type =~ s/\(.*//; # remove any precision
 			# in case of user defined type try to gather the underlying base types
-			if (!exists $self->{data_type}{$data_type}) {
+			if (!exists $self->{data_type}{$data_type} && exists $self->{user_type}{$stt->[$idx]}) {
 				push(@has_custom_type, $idx);
-				%{$user_type{$idx}} = $self->custom_type_definition($stt->[$idx]);
+				%{ $user_type{$idx} } = %{ $self->{user_type}{$stt->[$idx]} };
 			}
 		}
 	}
@@ -14489,8 +14597,6 @@ sub _extract_data
 					last;
 				}
 
-				# Retrieve LOB data from locator
-				$self->{chunk_size} = 8192;
 				# Then foreach row use the returned lob locator to retrieve data
 				# and all column with a LOB data type, extract data by chunk
 				for (my $j = 0; $j <= $#$stt; $j++) {
@@ -14502,30 +14608,35 @@ sub _extract_data
 						$data_type =~ s/\(.*//; # remove any precision
 						$row[$j] =  $self->set_custom_type_value($data_type, $user_type{$j}, $row[$j], $tt->[$j], 0);
 
+					# Retrieve LOB data from locator
 					} elsif (($stt->[$j] =~ /LOB/) && $row[$j]) {
 
 						my $lob_content = '';
 						my $offset = 1;   # Offsets start at 1, not 0
 						if ( ($self->{parallel_tables} > 1) || (($self->{oracle_copies} > 1) && $self->{defined_pk}{"\L$table\E"}) ) {
+							# Get chunk size
+							my $chunk_size = $dbh->ora_lob_chunk_size($row[$j]) || 8192;
 							while (1) {
-								my $lobdata = $dbh->ora_lob_read($row[$j], $offset, $self->{chunk_size} );
+								my $lobdata = $dbh->ora_lob_read($row[$j], $offset, $chunk_size );
 								if ($dbh->errstr) {
-									$self->logit("ERROR: " . $dbh->errstr . "\n", 0, 0);
+									$self->logit("ERROR: " . $dbh->errstr . "\n", 0, 0) if ($dbh->errstr !~ /ORA-22831/);
 									last;
 								}
 								last unless (defined $lobdata && length $lobdata);
-								$offset += $self->{chunk_size};
+								$offset += $chunk_size;
 								$lob_content .= $lobdata;
 							}
 						} else {
+							# Get chunk size
+							my $chunk_size = $self->{dbh}->ora_lob_chunk_size($row[$j]) || 8192;
 							while (1) {
-								my $lobdata = $self->{dbh}->ora_lob_read($row[$j], $offset, $self->{chunk_size} );
+								my $lobdata = $self->{dbh}->ora_lob_read($row[$j], $offset, $chunk_size );
 								if ($self->{dbh}->errstr) {
-									$self->logit("ERROR: " . $self->{dbh}->errstr . "\n", 0, 0);
+									$self->logit("ERROR: " . $self->{dbh}->errstr . "\n", 0, 0) if ($dbh->errstr !~ /ORA-22831/);
 									last;
 								}
 								last unless (defined $lobdata && length $lobdata);
-								$offset += $self->{chunk_size};
+								$offset += $chunk_size;
 								$lob_content .= $lobdata;
 							}
 						}
@@ -16589,7 +16700,7 @@ WHERE c.relkind IN ('S','')
       $schema_clause
 };
 	} elsif ($obj_type eq 'TYPE') {
-		my $obj_infos = $self->_get_types($self->{dbh});
+		my $obj_infos = $self->_get_types();
 		$nbobj = $#{$obj_infos} + 1;
 		$schema_clause .= " AND pg_catalog.pg_type_is_visible(t.oid)" if ($schema_clause =~ /information_schema/);
 		$sql = qq{
@@ -17202,24 +17313,24 @@ sub multiprocess_progressbar
 			# Display table progression
 			my $dt = $table_progress{$1}{end} - $table_progress{$1}{start};
 			my $rps = int($table_progress{$1}{progress}/ ($dt||1));
-			print STDERR $self->progress_bar($table_progress{$1}{progress}, $table_progress{$1}{rows}, 25, '=', 'rows', "Table $1 ($dt sec., $rps recs/sec)") . "\n";
+			print STDERR $self->progress_bar($table_progress{$1}{progress}, $table_progress{$1}{rows}, 25, '=', 'rows', "Table $1 ($dt sec., $rps recs/sec)"), "\n";
 			# Display global export progression
 			my $cur_time = time();
 			$dt = $cur_time - $global_start_time;
 			$rps = int($global_line_counter/ ($dt || 1));
-			print STDERR $self->progress_bar($global_line_counter, $total_rows, 25, '=', 'total rows', "- ($dt sec., avg: $rps recs/sec), $1 in progress.") . "\r";
+			print STDERR $self->progress_bar($global_line_counter, $total_rows, 25, '=', 'total rows', "- ($dt sec., avg: $rps recs/sec), $1 in progress."), "\r";
 			$last_refresh = $cur_time;
 
 		# A chunk of DATA_LIMIT row is exported
 		} elsif ($r =~ /CHUNK \d+ DUMPED: (.*?), time: (\d+), rows (\d+)/) {
 
 			$table_progress{$1}{progress} += $3;
-			$global_line_counter += $3;
+			$global_line_counter += $3 if ($self->{disable_partition});
 			my $cur_time = time();
 			if ($cur_time >= ($last_refresh + $refresh_time)) {
 				my $dt = $cur_time - $global_start_time;
 				my $rps = int($global_line_counter/ ($dt || 1));
-				print STDERR $self->progress_bar($global_line_counter, $total_rows, 25, '=', 'total rows', "- ($dt sec., avg: $rps recs/sec), $1 in progress.") . "\r";
+				print STDERR $self->progress_bar($global_line_counter, $total_rows, 25, '=', 'total rows', "- ($dt sec., avg: $rps recs/sec), $1 in progress."), "\r";
 				$last_refresh = $cur_time;
 			}
 
@@ -17232,7 +17343,7 @@ sub multiprocess_progressbar
 			# Get all statistics from multiple Oracle query
 			for (my $i = 0; $i < $self->{oracle_copies}; $i++) {
 				$table_progress{$1}{start} = $table_progress{"$1-part-$i"}{start} if (!exists $table_progress{$1}{start});
-				$table_progress{$1}{rows} += $table_progress{"$1-part-$i"}{rows};
+				$table_progress{$1}{rows} = $table_progress{"$1-part-$i"}{rows};
 				delete $table_progress{"$1-part-$i"};
 			}
 
@@ -17245,7 +17356,7 @@ sub multiprocess_progressbar
 			# Display table progression
 			my $dt = $table_progress{$1}{end} - $table_progress{$1}{start};
 			my $rps = int($table_progress{$1}{rows}/ ($dt||1));
-			print STDERR $self->progress_bar($table_progress{$1}{rows}, $table_progress{$1}{rows}, 25, '=', 'rows', "Table $1 ($dt sec., $rps recs/sec)") . "\n";
+			print STDERR $self->progress_bar($table_progress{$1}{rows}, $table_progress{$1}{rows}, 25, '=', 'rows', "Table $1 ($dt sec., $rps recs/sec)"), "\n";
 
 		} else {
 			print "PROGRESS BAR ERROR (unrecognized line sent to pipe): $r\n";
@@ -17652,10 +17763,9 @@ sub _lookup_function
 
 	@{$fct_detail{param_types}} = ();
 	$fct_detail{declare} =~ s/(\b(?:FUNCTION|PROCEDURE)\s+(?:[^\s\(]+))(\s*\%ORA2PG_COMMENT\d+\%\s*)+/$2$1 /is;
-	#if ( ($fct_detail{declare} =~ s/(.*?)\b(FUNCTION|PROCEDURE)\s+([^\s\(]+)(?:\s*\%ORA2PG_COMMENT\d+\%)*\s*(\([^\)]*\))//is) || 
-	#($fct_detail{declare} =~ s/(.*?)\b(FUNCTION|PROCEDURE)\s+([^\s\(]+)(?:\s*\%ORA2PG_COMMENT\d+\%)*\s+(RETURN|IS|AS)/$4/is) ) {
 	if ( ($fct_detail{declare} =~ s/(.*?)\b(FUNCTION|PROCEDURE)\s+([^\s\(]+)\s*(\([^\)]*\))//is) || 
-	($fct_detail{declare} =~ s/(.*?)\b(FUNCTION|PROCEDURE)\s+([^\s\(]+)\s+(RETURN|IS|AS)/$4/is) ) {
+			($fct_detail{declare} =~ s/(.*?)\b(FUNCTION|PROCEDURE)\s+([^\s\(]+)\s+(RETURN|IS|AS)/$4/is) )
+	{
 		$fct_detail{before} = $1;
 		$fct_detail{type} = uc($2);
 		$fct_detail{name} = $3;
@@ -18689,7 +18799,7 @@ sub _escape_lob
 			#$col = escape_bytea($col);
 			# RAW data type is returned in hex
 			$col = unpack("H*",$col) if ($generic_type ne 'RAW');
-			$col = '\\\\x' . $col;
+			$col = '\\x' . $col;
 		} elsif (($generic_type eq 'CLOB') || $cond->{istext}) {
 			$col = $self->escape_copy($col, $isnested);
 		}
@@ -18790,7 +18900,7 @@ sub clear_global_declaration
 	}
 	# Extract TYPE/SUBTYPE declaration
 	my $i = 0;
-	while ($str =~ s/(SUBTYPE|TYPE)\s+([^\s]+)\s+(AS|IS)\s+([^;]+;)//is) {
+	while ($str =~ s/\b(SUBTYPE|TYPE)\s+([^\s\(\)]+)\s+(AS|IS)\s+([^;]+;)//is) {
 		$self->{pkg_type}{$pname}{$2} = "$pname.$2";
 		my $code = "$1 $self->{pkg_type}{$pname}{$2} AS $4";
 		push(@{$self->{types}}, { ('name' => $2, 'code' => $code, 'pos' => $i++) });

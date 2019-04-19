@@ -31,7 +31,7 @@ use POSIX qw(locale_h);
 setlocale(LC_NUMERIC,"C");
 
 
-$VERSION = '19.1';
+$VERSION = '20.0';
 
 #----------------------------------------------------
 # Cost scores used when converting PLSQL to PLPGSQL
@@ -637,14 +637,17 @@ sub plsql_to_plpgsql
 	$str =~ s/NVL2\s*\($field,$field,$field\)/coalesce($1,$3)/is;
 
 	# NLSSORT to COLLATE
-	if ($str =~ /NLSSORT\($field,$field[\)]?/is) {
+	if ($str =~ /NLSSORT\($field,$field[\)]?/is)
+	{
 		my $col = $1;
 		my $nls_sort = $2;
 		if ($nls_sort =~ s/\%\%string(\d+)\%\%/$strings[$1]/gs) {
 			$nls_sort =~ s/NLS_SORT=([^']+)[']*/COLLATE "$1"/is;
+			$nls_sort =~ s/\%\%ESCAPED_STRING\%\%//ig;
 			$str =~ s/NLSSORT\($field,$field[\)]?/$1 $nls_sort/is;
 		} elsif ($nls_sort =~ s/\?TEXTVALUE(\d+)\?/$class->{text_values}{$1}/s) {
 			$nls_sort =~ s/\s*'NLS_SORT=([^']+)'/COLLATE "$1"/is;
+			$nls_sort =~ s/\%\%ESCAPED_STRING\%\%//ig;
 			$str =~ s/NLSSORT\($field,$field[\)]?/$1 $nls_sort/is;
 		} else {
 			$str =~ s/NLSSORT\($field,['\s]*NLS_SORT=([^']+)[']*/$1 COLLATE "$2"/is;
@@ -965,6 +968,8 @@ sub perform_replacement
 							while ($str =~ s/(EXCEPTION(?:(?!CASE).)*?THEN)((?:\s*%ORA2PG_COMMENT\d+\%\s*)*\s*)($fct_name\s*[\(;])/$1$2PERFORM $3/is) {};
 							$str =~ s/(IF(?:(?!CASE|THEN).)*?THEN)((?:\s*%ORA2PG_COMMENT\d+\%\s*)*\s*)($fct_name\s*[\(;])/$1$2PERFORM $3/isg;
 							$str =~ s/(IF(?:(?!CASE|ELSE).)*?ELSE)((?:\s*%ORA2PG_COMMENT\d+\%\s*)*\s*)($fct_name\s*[\(;])/$1$2PERFORM $3/isg;
+							$str =~ s/(WHEN(?:(?!CASE|THEN).)*?THEN)((?:\s*%ORA2PG_COMMENT\d+\%\s*)*\s*)($fct_name\s*[\(;])/$1$2PERFORM $3/isg;
+							$str =~ s/(WHEN(?:(?!CASE|ELSE).)*?ELSE)((?:\s*%ORA2PG_COMMENT\d+\%\s*)*\s*)($fct_name\s*[\(;])/$1$2PERFORM $3/isg;
 							$str =~ s/(PERFORM $fct_name);/$1\(\);/igs;
 						}
 					} else {
@@ -1947,9 +1952,9 @@ sub replace_cursor_def
 	$str =~ s/\bSYS_REFCURSOR\b/REFCURSOR/isg;
 
 	# Replace CURSOR IS SELECT by CURSOR FOR SELECT
-	$str =~ s/\bCURSOR(\s+)IS(\s+)SELECT/CURSOR$1FOR$2SELECT/isg;
+	$str =~ s/\bCURSOR(\s+)IS(\s+)(\%ORA2PG_COMMENT\d+\%)?(\s*)SELECT/CURSOR$1FOR$2$3$4SELECT/isg;
 	# Replace CURSOR (param) IS SELECT by CURSOR FOR SELECT
-	$str =~ s/\bCURSOR(\s*\([^\)]+\)\s*)IS(\s*)SELECT/CURSOR$1FOR$2SELECT/isg;
+	$str =~ s/\bCURSOR(\s*\([^\)]+\)\s*)IS(\s*)(\%ORA2PG_COMMENT\d+\%)?(\s*)SELECT/CURSOR$1FOR$2$3$4SELECT/isg;
 
 	# Replace REF CURSOR as Pg REFCURSOR
 	$str =~ s/\bIS(\s*)REF\s+CURSOR/REFCURSOR/isg;
@@ -2167,6 +2172,9 @@ sub mysql_to_plpgsql
 	# Remove extra parenthesis in join in some possible cases
 	# ... INNER JOIN(services s) ON ...
 	$str =~ s/\bJOIN\s*\(([^\s]+\s+[^\s]+)\)/JOIN $1/igs;
+
+	# Rewrite MySQL JOIN with WHERE clause instead of ON
+	$str =~ s/\((\s*[^\s]+(?:\s+[^\s]+)?\s+JOIN\s+[^\s]+(?:\s+[^\s]+)?\s*)\)\s+WHERE\s+/$1 ON /igs;
 
 	# Try to replace LEAVE label by EXIT label
 	my %repl_leave = ();
