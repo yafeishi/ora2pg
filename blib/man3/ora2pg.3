@@ -133,7 +133,7 @@
 .\" ========================================================================
 .\"
 .IX Title "doc::Ora2Pg 3"
-.TH doc::Ora2Pg 3 "2019-06-18" "perl v5.16.3" "User Contributed Perl Documentation"
+.TH doc::Ora2Pg 3 "2019-07-10" "perl v5.16.3" "User Contributed Perl Documentation"
 .\" For nroff, turn off justification.  Always turn off hyphenation; it makes
 .\" way too many mistakes in technical documents.
 .if n .ad l
@@ -830,6 +830,11 @@ declared in the current schema. By setting a comma separated list of schema
 as value of this directive, Ora2Pg will look forward in these packages for
 all functions/procedures/packages declaration before proceeding to current
 schema export.
+.IP "\s-1NO_FUNCTION_METADATA\s0" 4
+.IX Item "NO_FUNCTION_METADATA"
+Force Ora2Pg to not look for function declaration. Note that this will prevent
+Ora2Pg to rewrite function replacement call if needed. Do not enable it unless
+looking forward at function breaks other export.
 .SS "Export type"
 .IX Subsection "Export type"
 The export action is perform following a single configuration directive '\s-1TYPE\s0',
